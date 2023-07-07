@@ -9,6 +9,7 @@ pipeline {
     }
     environment {
         // mobsf config variables
+        // test 
         port = '8000'
         api_url = "http://172.31.64.174:${port}/api/v1"
         api_key = ''
