@@ -62,6 +62,7 @@ pipeline {
             steps {
                 script {
                     try {
+                        sh 'pwd'
                         download_cmd = "wget -q ${params.universalurl}"
                         download_status = sh label: 'Source Code Downloading', returnStatus: true, script: download_cmd
                         if(download_status != 0) {
