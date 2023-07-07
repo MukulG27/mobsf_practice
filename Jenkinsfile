@@ -46,14 +46,14 @@ pipeline {
         dd_api_key = credentials('defect-dojo-key')
         dd_product_type = 'Security Report'
         dd_product_name = 'Mobile App Scanner'
-        dd_engagement_name = 'MobSF Scanner'
+        dd_engagement_name = 'MobSF Scanner Research'
         dd_scan_type = 'MobSF Scan'
         dd_test_title = "MobSF"
         dd_test_id = -1
         dd_url = "http://172.31.64.174:${dd_port}/"
         // Slack config variables
         slack_api_token = 'security-slack-token'
-        slack_channel = 'security-reports'
+        slack_channel = 'trial'
         slack_pdf_report = ''
     }
     stages {
