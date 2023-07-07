@@ -1,0 +1,347 @@
+def beautify() {
+    try {
+        sh label: 'Installing Dependencies', script: "pip3 install pandas pdfkit wkhtmltopdf"
+        code = """
+import os
+import sys
+import json
+import pickle
+
+file = sys.argv[1]
+finding = json.load(open(file, "rb"))
+if os.path.isfile("dump.pkl"):
+    table = pickle.load(open("dump.pkl", "rb"))
+else:
+    table = []
+count = 0
+for result in finding['results']:
+    row = []
+    repo = sys.argv[1]
+    row.append(repo)
+    kv = {}
+    for desc in result['description'][2:].split("\\n**"):
+        kv[desc.split(":**")[0]] = desc.split(":**")[1].strip()
+    row.append(kv['Detector'])
+    row.append(result['file_path'])
+    row.append(result['line'])
+    row.append(kv['Committer'])
+    date_time = kv['Commit Date'][:19].split(" ")
+    date = date_time[0].split("-")[2]+"-"+date_time[0].split("-")[1]+"-"+date_time[0].split("-")[0]
+    row.append(date)
+    row.append(kv['Raw Data'])
+    if "RawV2 Data" in kv.keys():
+        row.append(kv['RawV2 Data'])
+    else:
+        row.append("")
+    if "Structured Data" in kv.keys():
+        row.append(kv['Structured Data'])
+    else:
+        row.append("")
+    if result['age'] > 0:
+        row.append("Open")
+    else:
+        row.append("New")
+        count += 1
+    table.append(row)
+    i += 1
+
+pickle.dump(table, open("dump.pkl", "wb"))
+print(count)
+                """
+        writeFile file: 'beautify.py', text: code
+        conv_code = """
+import os
+import sys
+import pandas as pd
+import pdfkit
+import pickle
+
+if os.path.isfile("dump.pkl"):
+    table = pickle.load(open("dump.pkl", "rb"))
+else:
+    table = []
+
+df = pd.DataFrame(table)
+if(len(df.columns) == 10):
+    df.columns = ["Repository", "Type", "File Path", "Line Number", "Committer", "Date", "Raw Data", "Raw V2 Data", "Structured Data", "Status"]
+df.to_html("file.html")
+pdfkit.from_file("file.html", sys.argv[1])
+                        """
+        writeFile file: 'convert.py', text: conv_code
+    }
+    catch (Exception e) {
+        echo "Python Script Error"
+        echo e.toString()
+        slackSend tokenCredentialId: slack_api_token, channel: slack_channel, botUser: true, color: "danger", message: "*Python Script Error*\n${e.getMessage()}\n*Pipeline URL:* ${env.BUILD_URL}console/"
+    }
+}
+
+pipeline {
+    agent {
+        label 'slave-security'
+    }
+    environment {
+        // status variables
+        trufflehog_install_status = -1
+        trufflehog_scan_json_status = -1
+        trufflehog_remove_files_status = -1
+        remove_files_status = -1
+        // response codes
+        scan_id_response_code = '0'
+        prod_id_response_code = '0'
+        repo_extract_response_code = '0'
+        // defect dojo config variables
+        dd_port = '443'
+        dd_api_url = "http://172.31.64.174:${dd_port}/api/v2/"
+        dd_api_key = credentials('defect-dojo-key')
+        dd_product_type = 'Security Report'
+        dd_product_name = 'Source Code Scanner'
+        dd_product_id = -1
+        dd_engagement_name = 'Secret Scanner'
+        dd_engagement_id = -1
+        dd_scan_type = 'Trufflehog Scan'
+        dd_scan_id = -1
+        dd_test_title = 'Trufflehog'
+        dd_url = "http://172.31.64.174:${dd_port}/"
+        // Slack config variables
+        slack_api_token = 'security-slack-token'
+        slack_channel = 'security-reports'
+        slack_file = 'SecretsReport.pdf'
+        new_finding_count = 0
+        finding_count = 0
+        // Github config variables
+        git_token = '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'
+    }
+    stages {
+        stage('Import Source Code') {
+            steps {
+                script {
+                    try {
+                        scan_id_cmd = "curl -s -S -w \"%{http_code}\" -o repo.json -X GET --url ${dd_api_url}test_types/?limit=500 -H \"Authorization: ${dd_api_key}\" -H \"accept: application/json\""
+                        scan_id_response_code = sh label: 'Scan ID', returnStdout: true, script: scan_id_cmd
+                        if(scan_id_response_code == '200') {
+                            response_map = readJSON file: 'repo.json'
+                            scan_list = response_map['results']
+                            scan_list.each { s ->
+                                if(s['name'] == dd_scan_type) {
+                                    dd_scan_id = s['id']
+                                }
+                            }
+                            if(dd_scan_id != -1) {
+                                prod_id_cmd = "curl -s -S -w \"%{http_code}\" -o repo.json -X GET --url ${dd_api_url}products/?limit=100 -H \"Authorization: ${dd_api_key}\" -H \"accept: application/json\""
+                                prod_id_response_code = sh label: 'Product ID', returnStdout: true, script: prod_id_cmd
+                                if(prod_id_response_code == '200') {
+                                    response_map = readJSON file: 'repo.json'
+                                    prod_list = response_map['results']
+                                    prod_list.each { p ->
+                                        if(p['name'] == dd_product_name) {
+                                            dd_product_id = p['id']
+                                        }
+                                    }
+                                    if(dd_product_id != -1) {
+                                        repo_extract_cmd = "curl -s -S -w \"%{http_code}\" -o repo.json -X GET --url ${dd_api_url}endpoints/?product=${dd_product_id} -H \"Authorization: ${dd_api_key}\" -H \"accept: application/json\""
+                                        repo_extract_response_code = sh label: 'Importing Source Code', returnStdout: true, script: repo_extract_cmd
+                                        response_map = readJSON file: 'repo.json'
+                                        if (repo_extract_response_code == '200') {
+                                            repo_list = response_map['results']
+                                            repo_list.each {
+                                                url = "${it['protocol']}://${it['host']}/${it['path']}"
+                                                it['url'] = url.toString()
+                                            }
+                                        }
+                                        else {
+                                            echo "Extraction Error"
+                                            echo response_map.toString()
+                                            slackSend tokenCredentialId: slack_api_token, channel: slack_channel, botUser: true, color: "danger", message: "*Source Code Links Import Error*\n*Pipeline URL:* ${env.BUILD_URL}console/"
+                                        }
+                                    }
+                                    else {
+                                        echo "Product ID Extraction Error"
+                                        echo response_map.toString()
+                                        slackSend tokenCredentialId: slack_api_token, channel: slack_channel, botUser: true, color: "danger", message: "*Product ID Extraction Error*\n*Pipeline URL:* ${env.BUILD_URL}console/"
+                                    }
+                                }
+                            }
+                            else {
+                                echo "Scan ID Extraction Error"
+                                echo response_map.toString()
+                                slackSend tokenCredentialId: slack_api_token, channel: slack_channel, botUser: true, color: "danger", message: "*Scan ID Extraction Error*\n*Pipeline URL:* ${env.BUILD_URL}console/"
+                            }
+                        }
+                    }
+                    catch(Exception e) {
+                        echo e.toString()
+                        slackSend tokenCredentialId: slack_api_token, channel: slack_channel, botUser: true, color: "danger", message: "*${e.getMessage()}*\n*Pipeline URL:* ${env.BUILD_URL}console/"
+                    }
+                }
+            }
+        }
+        stage('TruffleHog') {
+            when {
+                expression {
+                    return repo_extract_response_code == '200'
+                }
+            }
+            stages {
+                stage('Tool Initialize') {
+                    steps {
+                        script {
+                            try {
+                                image_install = 'docker pull trufflesecurity/trufflehog:latest'
+                                trufflehog_install_status = sh label: 'Trufflehog Install', returnStatus: true, script: image_install
+                                if (trufflehog_install_status != 0) {
+                                    echo 'Trufflehog Installation Error'
+                                    echo trufflehog_install_status.toString()
+                                    slackSend tokenCredentialId: slack_api_token, channel: slack_channel, botUser: true, color: "danger", message: "*Trufflehog Installation Error*\n*Pipeline URL:* ${env.BUILD_URL}console/"
+                                }
+                            }
+                            catch(Exception e) {
+                                echo e.toString()
+                                slackSend tokenCredentialId: slack_api_token, channel: slack_channel, botUser: true, color: "danger", message: "*${e.getMessage()}*\n*Pipeline URL:* ${env.BUILD_URL}console/"
+                            }
+                        }
+                    }
+                }
+                stage('Scan and JSON Upload') {
+                    when {
+                        expression {
+                            return trufflehog_install_status == 0
+                        }
+                    }
+                    steps {
+                        script {
+                            repo_list.each {
+                                try {
+                                    if (it['tags'].contains('trufflehog')) {
+                                        scan_json_cmd = "docker run --rm -v \"${WORKSPACE}:/pwd\" --name trufflehog trufflesecurity/trufflehog:latest github --repo ${it['url']} --token ${git_token} --json > \"${WORKSPACE}/json_report.json\""
+                                        trufflehog_scan_json_status = sh label: 'Scan', returnStatus: true, script: scan_json_cmd
+                                        if (trufflehog_scan_json_status == 0) {
+                                            upload_json_cmd = """
+                                                                curl -s -S -w \"%{http_code}\" -o response.json -X POST \\
+                                                                -H \"Authorization: ${dd_api_key}\" --url \"${dd_api_url}import-scan/\" \\
+                                                                -F \"product_type=${dd_product_type}\" -F \"product_name=${dd_product_name}\" -F \"engagement_name=${dd_engagement_name}\" \\
+                                                                -F \"scan_type=${dd_scan_type}\" -F \"file=@json_report.json\" -F \"test_title=${dd_test_title}-${it['path']}\" \\
+                                                                -F \"auto_create_context=true\" -F \"deduplication_on_engagement=true\" -F \"skip_duplicates=true\" \\
+                                                                -F \"endpoint_to_add=${it['id']}\"
+                                                                """
+                                            it['trufflehog_upload_json_response_code'] = sh label: 'Upload JSON Report', returnStdout: true, script: upload_json_cmd
+                                            response_map = readJSON file: 'response.json'
+                                            if (it['trufflehog_upload_json_response_code'] != '201') {
+                                                echo 'DefectDojo JSON Upload Error'
+                                                echo it['path']
+                                                echo it['trufflehog_upload_json_response_code']
+                                                echo response_map.toString()
+                                                slackSend tokenCredentialId: slack_api_token, channel: slack_channel, botUser: true, color: "danger", message: "*DefectDojo JSON Upload Error for Repository ${it['path']}*\n*Pipeline URL:* ${env.BUILD_URL}console/"
+                                            }
+                                            else {
+                                                it['latest_test'] = response_map['test']
+                                                it['truffle_engagement'] = response_map['engagement_id']
+                                                dd_engagement_id = response_map['engagement_id']
+                                                it['product'] = response_map['product_id']
+                                                it['product_type'] = response_map['product_type_id']
+                                            }
+                                        }
+                                        else {
+                                            echo 'Trufflehog Scan error'
+                                            echo it['path']
+                                            echo trufflehog_scan_json_status.toString()
+                                            slackSend tokenCredentialId: slack_api_token, channel: slack_channel, botUser: true, color: "danger", message: "*Trufflehog Scan Error for Repository ${it['path']}*\n*Pipeline URL:* ${env.BUILD_URL}console/"
+                                        }
+                                    }
+                                }
+                                catch(Exception e) {
+                                    echo it['path']
+                                    echo e.toString()
+                                    slackSend tokenCredentialId: slack_api_token, channel: slack_channel, botUser: true, color: "danger", message: "*${e.getMessage()} for Repository ${it['path']}*\n*Pipeline URL:* ${env.BUILD_URL}console/"
+                                }
+                            }
+                        }
+                    }
+                }
+                stage('PDF Generation and Upload') {
+                    when {
+                        expression {
+                            return trufflehog_install_status == 0
+                        }
+                    }
+                    steps {
+                        script {
+                            beautify()
+                            repo_list.each { repo ->
+                                try {
+                                    if(repo['tags'].contains('trufflehog') && repo['trufflehog_upload_json_response_code'] == '201') {
+                                        fetch_cmd = "curl -s -S -w \"%{http_code}\" -o finding.json -X GET --url ${dd_api_url}findings/?active=true\\&verified=false\\&endpoints=${repo['id']}\\&found_by=${dd_scan_id}\\&limit=1000000 -H \"Authorization: ${dd_api_key}\" -H \"accept: application/json\""
+                                        repo['trufflehog_fetch_response_code'] = sh label: 'Fetch New Findings', returnStdout: true, script: fetch_cmd
+                                        response_map = readJSON file: 'finding.json'
+                                        if(repo['trufflehog_fetch_response_code'] == '200') {
+                                            repo['finding_count'] = response_map['count']
+                                            finding_count = (finding_count as Integer) + repo['finding_count']
+                                            store_cmd = "python3 beautify.py finding.json ${repo['path']}"
+                                            count = sh label: 'Findings', returnStdout: true, script: store_cmd
+                                            new_finding_count = (new_finding_count as Integer) + (count as Integer)
+                                        }
+                                        else {
+                                            echo 'DefectDojo Findings Fetch Error'
+                                            echo repo['path']
+                                            echo repo['trufflehog_fetch_response_code']
+                                            echo response_map.toString()
+                                            slackSend tokenCredentialId: slack_api_token, channel: slack_channel, botUser: true, color: "danger", message: "*DefectDojo Findings Fetch Error for Repository ${repo['path']}*\n*Pipeline URL:* ${env.BUILD_URL}console/"
+                                        }
+                                    }
+                                }
+                                catch(Exception e) {
+                                    echo repo['path']
+                                    echo e.toString()
+                                    slackSend tokenCredentialId: slack_api_token, channel: slack_channel, botUser: true, color: "danger", message: "*${e.getMessage()} for Repository ${repo['path']}*\n*Pipeline URL:* ${env.BUILD_URL}console/"
+                                }
+                            }
+                            try {
+                                pdf_cmd = "python3 convert.py ${slack_file}"
+                                sh label: "PDF Generating", script: pdf_cmd
+                                slackUploadFile credentialId: slack_api_token, channel: slack_channel, filePath: slack_file, initialComment: "*Secret Scanning*\n\n*New Secrets Found:* ${new_finding_count}\n*Open Findings:* ${finding_count}\n\n*Pipeline URL:* ${env.BUILD_URL}console/\n*Endpoint URL:* ${dd_url}endpoint?product=${dd_product_id}\n*Engagement URL:* ${dd_url}engagement/${dd_engagement_id}\n\n"
+                            }
+                            catch(Exception e) {
+                                echo e.toString()
+                                slackSend tokenCredentialId: slack_api_token, channel: slack_channel, botUser: true, color: "danger", message: "*${e.getMessage()}*\n*Pipeline URL:* ${env.BUILD_URL}console/"
+                            }
+                        }
+                    }
+                }
+                stage('Cleanup') {
+                    steps {
+                        script {
+                            try {
+                                remove_files_cmd = "rm -f dump.pkl finding.json json_report.json response.json"
+                                trufflehog_remove_files_status = sh label: 'Remove Files', returnStatus: true, script: remove_files_cmd
+                                if(trufflehog_remove_files_status != 0) {
+                                    echo "Error in Removing Files"
+                                    echo trufflehog_remove_files_status.toString()
+                                    slackSend tokenCredentialId: slack_api_token, channel: slack_channel, botUser: true, color: "danger", message: "*Error in Removing Files*\n*Pipeline URL:* ${env.BUILD_URL}console/"
+                                }
+                            }
+                            catch(Exception e) {
+                                echo e.toString()
+                                slackSend tokenCredentialId: slack_api_token, channel: slack_channel, botUser: true, color: "danger", message: "*${e.getMessage()}*\n*Pipeline URL:* ${env.BUILD_URL}console/"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    post {
+        always {
+            script {
+                stage('Cleanup of Source Code List') {
+                    remove_files_cmd = "rm -f repo.json"
+                    remove_files_status = sh label: 'Remove Files', returnStatus: true, script: remove_files_cmd
+                    if(remove_files_status != 0) {
+                        echo "Error in Removing Source Code List"
+                        echo remove_files_status.toString()
+                        slackSend tokenCredentialId: slack_api_token, channel: slack_channel, botUser: true, color: "danger", message: "*Error in Removing Source Code List*\n*Pipeline URL:* ${env.BUILD_URL}console/"
+                    }
+                }
+            }
+        }
+    }
+}
